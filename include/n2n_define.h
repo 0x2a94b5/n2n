@@ -35,11 +35,24 @@
 #define IFACE_UPDATE_INTERVAL           (30) /* sec. How long it usually takes to get an IP lease. */
 #define TRANSOP_TICK_INTERVAL           (10) /* sec */
 
+#define PURGE_REGISTRATION_FREQUENCY   30
+#define REGISTRATION_TIMEOUT           60
+
+#define SORT_COMMUNITIES_INTERVAL      90 /* sec. until supernode sorts communities' hash list again */
+
 #define ETH_FRAMESIZE 14
 #define IP4_SRCOFFSET 12
 #define IP4_DSTOFFSET 16
 #define IP4_MIN_SIZE  20
 #define UDP_SIZE      8
+
+/* parameters for replay protection */
+#define TIME_STAMP_FRAME	0x0000001000000000LL /* clocks of different computers are allowed +/- 16 seconds to be off */
+#define TIME_STAMP_JITTER	0x0000000027100000LL /* we allow a packet to arrive 160 ms (== 0x27100 us) before another 
+                                                      * set to 0x0000000000000000LL if increasing (or equal) time stamps allowed only */
+
+/* parameter for random number generation */
+#define RND_RETRIES     1000 /* syscall and inquiring random number from hardware generators might fail, so we will retry */
 
 /* N2N compression indicators. */
 /* Compression is disabled by default for outgoing packets if no cli
@@ -57,6 +70,10 @@
 #define N2N_COMPRESSION_ID_BITLEN	3	/* number of bits used for encoding compression id in the uppermost
 				 	           bits of transform_id; will be obsolete as soon as compression gets
 						   its own field in the packet. REVISIT then. */
+
+/* (un)purgeable community indicator (supernode) */
+#define COMMUNITY_UNPURGEABLE		0
+#define COMMUNITY_PURGEABLE		1
 
 /* Header encryption indicators */
 #define HEADER_ENCRYPTION_UNKNOWN       0
@@ -83,6 +100,15 @@
 #define N2N_SN_LPORT_DEFAULT 7654
 #define N2N_SN_PKTBUF_SIZE   2048
 
+
+/* The way TUNTAP allocated IP. */
+#define TUNTAP_IP_MODE_SN_ASSIGN 0
+#define TUNTAP_IP_MODE_STATIC 1
+#define TUNTAP_IP_MODE_DHCP 2
+
+/* Default network segment of the dhcp service provided by sn. */
+#define N2N_SN_DHCP_NET_ADDR_DEFAULT "172.17.12.0"
+#define N2N_SN_DHCP_NET_BIT_DEFAULT 24
 
 /* ************************************** */
 

@@ -21,13 +21,7 @@
 #include "n2n.h"
 #include "header_encryption.h"
 
-
-
-
-
 static n2n_sn_t sss_node;
-
-
 
 /** Load the list of allowed communities. Existing/previous ones will be removed
  *
@@ -37,6 +31,8 @@ static int load_allowed_sn_community(n2n_sn_t *sss, char *path) {
   FILE *fd = fopen(path, "r");
   struct sn_community *s, *tmp;
   uint32_t num_communities = 0;
+  struct sn_community_regular_expression *re, *tmp_re;
+  uint32_t num_regex = 0;
 
   if(fd == NULL) {
     traceEvent(TRACE_WARNING, "File %s not found", path);
@@ -48,6 +44,11 @@ static int load_allowed_sn_community(n2n_sn_t *sss, char *path) {
     if (NULL != s->header_encryption_ctx)
       free (s->header_encryption_ctx);
     free(s);
+  }
+
+  HASH_ITER(hh, sss->rules, re, tmp_re) {
+    HASH_DEL(sss->rules, re);
+    free(re);
   }
 
   while((line = fgets(buffer, sizeof(buffer), fd)) != NULL) {
@@ -65,11 +66,26 @@ static int load_allowed_sn_community(n2n_sn_t *sss, char *path) {
 	break;
     }
 
+    // if it contains typical characters...
+    if(NULL != strpbrk(line, ".^$*+?[]\\")) {
+      // ...it is treated as regular expression
+      re = (struct sn_community_regular_expression*)calloc(1,sizeof(struct sn_community_regular_expression));
+      if (re) {
+        re->rule = re_compile(line);
+        HASH_ADD_PTR(sss->rules, rule, re);
+	num_regex++;
+        traceEvent(TRACE_INFO, "Added regular expression for allowed communities '%s'", line);
+        continue;
+      }
+    }
+
     s = (struct sn_community*)calloc(1,sizeof(struct sn_community));
 
     if(s != NULL) {
       strncpy((char*)s->community, line, N2N_COMMUNITY_SIZE-1);
       s->community[N2N_COMMUNITY_SIZE-1] = '\0';
+      /* loaded from file, this community is unpurgeable */
+      s->purgeable = COMMUNITY_UNPURGEABLE;
       /* we do not know if header encryption is used in this community,
        * first packet will show. just in case, setup the key.           */
       s->header_encryption = HEADER_ENCRYPTION_UNKNOWN;
@@ -84,8 +100,17 @@ static int load_allowed_sn_community(n2n_sn_t *sss, char *path) {
 
   fclose(fd);
 
-  traceEvent(TRACE_NORMAL, "Loaded %u communities from %s",
+  if ((num_regex + num_communities) == 0)
+  {
+    traceEvent(TRACE_WARNING, "File %s does not contain any valid community names or regular expressions", path);
+    return -1;
+  }
+
+  traceEvent(TRACE_NORMAL, "Loaded %u fixed-name communities from %s",
 	     num_communities, path);
+
+  traceEvent(TRACE_NORMAL, "Loaded %u regular expressions for community name matching from %s",
+	     num_regex, path);
 
   /* No new communities will be allowed */
   sss->lock_communities = 1;
@@ -98,76 +123,137 @@ static int load_allowed_sn_community(n2n_sn_t *sss, char *path) {
 
 /** Help message to print if the command line arguments are not valid. */
 static void help() {
-  print_n2n_version();
+	print_n2n_version();
 
-  printf("supernode <config file> (see supernode.conf)\n"
-	 "or\n"
-	 );
-  printf("supernode ");
-  printf("-l <lport> ");
-  printf("-c <path> ");
+	printf("supernode <config file> (see supernode.conf)\n"
+	       "or\n"
+	);
+	printf("supernode ");
+	printf("-l <local port> ");
+	printf("-c <path> ");
 #if defined(N2N_HAVE_DAEMON)
-  printf("[-f] ");
+	printf("[-f] ");
 #endif
-  printf("[-v] ");
-  printf("\n\n");
+#ifndef WIN32
+	printf("[-u <uid> -g <gid>] ");
+#endif /* ifndef WIN32 */
+	printf("[-t <mgmt port>] ");
+	printf("[-d <net/bit>] ");
+	printf("[-v] ");
+	printf("\n\n");
 
-  printf("-l <lport>\tSet UDP main listen port to <lport>\n");
-  printf("-c <path>\tFile containing the allowed communities.\n");
+	printf("-l <port>     | Set UDP main listen port to <port>\n");
+	printf("-c <path>     | File containing the allowed communities.\n");
 #if defined(N2N_HAVE_DAEMON)
-  printf("-f        \tRun in foreground.\n");
+	printf("-f            | Run in foreground.\n");
 #endif /* #if defined(N2N_HAVE_DAEMON) */
-  printf("-v        \tIncrease verbosity. Can be used multiple times.\n");
-  printf("-h        \tThis help message.\n");
-  printf("\n");
+#ifndef WIN32
+	printf("-u <UID>      | User ID (numeric) to use when privileges are dropped.\n");
+	printf("-g <GID>      | Group ID (numeric) to use when privileges are dropped.\n");
+#endif /* ifndef WIN32 */
+	printf("-t <port>     | Management UDP Port (for multiple supernodes on a machine).\n");
+	printf("-d <net/bit>  | Subnet that provides dhcp service for edge. eg. -d 172.17.12.0/24\n");
+	printf("-v            | Increase verbosity. Can be used multiple times.\n");
+	printf("-h            | This help message.\n");
+	printf("\n");
 
-  exit(1);
+	exit(1);
 }
 
 
 /* *************************************************** */
 
 static int setOption(int optkey, char *_optarg, n2n_sn_t *sss) {
-  //traceEvent(TRACE_NORMAL, "Option %c = %s", optkey, _optarg ? _optarg : "");
+	//traceEvent(TRACE_NORMAL, "Option %c = %s", optkey, _optarg ? _optarg : "");
 
-  switch(optkey) {
-  case 'l': /* local-port */
-    sss->lport = atoi(_optarg);
-    break;
+	switch (optkey) {
+		case 'l': /* local-port */
+			sss->lport = atoi(_optarg);
+			break;
 
-  case 'c': /* community file */
-    load_allowed_sn_community(sss, _optarg);
-    break;
+		case 't': /* mgmt-port */
+			sss->mport = atoi(_optarg);
+			break;
 
-  case 'f': /* foreground */
-    sss->daemon = 0;
-    break;
+		case 'd': {
+			dec_ip_str_t ip_str = {'\0'};
+			in_addr_t net;
+			uint8_t bitlen;
 
-  case 'h': /* help */
-    help();
-    break;
+			if (sscanf(_optarg, "%15[^/]/%hhu", ip_str, &bitlen) != 2) {
+				traceEvent(TRACE_WARNING, "Bad net/bit format '%s'. See -h.", _optarg);
+				break;
+			}
 
-  case 'v': /* verbose */
-    setTraceLevel(getTraceLevel() + 1);
-    break;
+			net = inet_addr(ip_str);
+			if ((net < 0) || (net == INADDR_NONE) || (net == INADDR_ANY)) {
+				traceEvent(TRACE_WARNING, "Bad network '%s' in '%s', Use default: '%s/%d'",
+				           ip_str, _optarg,
+				           N2N_SN_DHCP_NET_ADDR_DEFAULT, N2N_SN_DHCP_NET_BIT_DEFAULT);
+				break;
+			}
 
-  default:
-    traceEvent(TRACE_WARNING, "Unknown option -%c: Ignored.", (char)optkey);
-    return(-1);
-  }
+			if (bitlen > 32) {
+				traceEvent(TRACE_WARNING, "Bad prefix '%hhu' in '%s', Use default: '%s/%d'",
+				           bitlen, _optarg,
+				           N2N_SN_DHCP_NET_ADDR_DEFAULT, N2N_SN_DHCP_NET_BIT_DEFAULT);
+				break;
+			}
 
-  return(0);
+			traceEvent(TRACE_NORMAL, "The subnet of DHCP service is: '%s/%hhu'.", ip_str, bitlen);
+
+			sss->dhcp_addr.net_addr = ntohl(net);
+			sss->dhcp_addr.net_bitlen = bitlen;
+
+			break;
+		}
+
+#ifndef WIN32
+		case 'u': /* unprivileged uid */
+			sss->userid = atoi(_optarg);
+			break;
+
+		case 'g': /* unprivileged uid */
+			sss->groupid = atoi(_optarg);
+			break;
+#endif
+
+		case 'c': /* community file */
+			load_allowed_sn_community(sss, _optarg);
+			break;
+
+		case 'f': /* foreground */
+			sss->daemon = 0;
+			break;
+
+		case 'h': /* help */
+			help();
+			break;
+
+		case 'v': /* verbose */
+			setTraceLevel(getTraceLevel() + 1);
+			break;
+
+		default:
+			traceEvent(TRACE_WARNING, "Unknown option -%c: Ignored.", (char) optkey);
+			return (-1);
+	}
+
+	return (0);
 }
+
 
 /* *********************************************** */
 
 static const struct option long_options[] = {
-  { "communities",     required_argument, NULL, 'c' },
-  { "foreground",      no_argument,       NULL, 'f' },
-  { "local-port",      required_argument, NULL, 'l' },
-  { "help"   ,         no_argument,       NULL, 'h' },
-  { "verbose",         no_argument,       NULL, 'v' },
-  { NULL,              0,                 NULL,  0  }
+		{"communities", required_argument, NULL, 'c'},
+		{"foreground",  no_argument,       NULL, 'f'},
+		{"local-port",  required_argument, NULL, 'l'},
+		{"mgmt-port",   required_argument, NULL, 't'},
+		{"dhcp",        required_argument, NULL, 'd'},
+		{"help",        no_argument,       NULL, 'h'},
+		{"verbose",     no_argument,       NULL, 'v'},
+		{NULL, 0,                          NULL, 0}
 };
 
 /* *************************************************** */
@@ -176,7 +262,7 @@ static const struct option long_options[] = {
 static int loadFromCLI(int argc, char * const argv[], n2n_sn_t *sss) {
   u_char c;
 
-  while((c = getopt_long(argc, argv, "fl:c:vh",
+  while((c = getopt_long(argc, argv, "fl:u:g:t:d:c:vh",
 			 long_options, NULL)) != '?') {
     if(c == 255) break;
     setOption(c, optarg, sss);
@@ -334,6 +420,9 @@ static void term_handler(int sig)
 /** Main program entry point from kernel. */
 int main(int argc, char * const argv[]) {
   int rc;
+#ifndef WIN32
+  struct passwd *pw = NULL;
+#endif
 
 	sn_init(&sss_node);
 
@@ -365,11 +454,6 @@ int main(int argc, char * const argv[]) {
   }
 #endif /* #if defined(N2N_HAVE_DAEMON) */
 
-#ifndef WIN32
-  if((getuid() == 0) || (getgid() == 0))
-    traceEvent(TRACE_WARNING, "Running as root is discouraged");
-#endif
-
   traceEvent(TRACE_DEBUG, "traceLevel is %d", getTraceLevel());
 
   sss_node.sock = open_socket(sss_node.lport, 1 /*bind ANY*/);
@@ -380,12 +464,33 @@ int main(int argc, char * const argv[]) {
     traceEvent(TRACE_NORMAL, "supernode is listening on UDP %u (main)", sss_node.lport);
   }
 
-  sss_node.mgmt_sock = open_socket(N2N_SN_MGMT_PORT, 0 /* bind LOOPBACK */);
+  sss_node.mgmt_sock = open_socket(sss_node.mport, 0 /* bind LOOPBACK */);
   if(-1 == sss_node.mgmt_sock) {
     traceEvent(TRACE_ERROR, "Failed to open management socket. %s", strerror(errno));
     exit(-2);
   } else
-    traceEvent(TRACE_NORMAL, "supernode is listening on UDP %u (management)", N2N_SN_MGMT_PORT);
+    traceEvent(TRACE_NORMAL, "supernode is listening on UDP %u (management)", sss_node.mport);
+
+#ifndef WIN32
+  if (((pw = getpwnam ("n2n")) != NULL) || ((pw = getpwnam ("nobody")) != NULL)) {
+    sss_node.userid = sss_node.userid == 0 ? pw->pw_uid : 0;
+    sss_node.groupid = sss_node.groupid == 0 ? pw->pw_gid : 0;
+  }
+  if((sss_node.userid != 0) || (sss_node.groupid != 0)) {
+    traceEvent(TRACE_NORMAL, "Dropping privileges to uid=%d, gid=%d",
+                              (signed int)sss_node.userid, (signed int)sss_node.groupid);
+
+    /* Finished with the need for root privileges. Drop to unprivileged user. */
+    if((setgid(sss_node.groupid) != 0)
+       || (setuid(sss_node.userid) != 0)) {
+      traceEvent(TRACE_ERROR, "Unable to drop privileges [%u/%s]", errno, strerror(errno));
+      exit(1);
+    }
+  }
+
+  if((getuid() == 0) || (getgid() == 0))
+    traceEvent(TRACE_WARNING, "Running as root is discouraged, check out the -u/-g options");
+#endif
 
   traceEvent(TRACE_NORMAL, "supernode started");
 

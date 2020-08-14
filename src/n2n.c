@@ -22,8 +22,6 @@
 
 #include <assert.h>
 
-#define PURGE_REGISTRATION_FREQUENCY   30
-#define REGISTRATION_TIMEOUT           60
 
 static const uint8_t broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 static const uint8_t multicast_addr[6] = { 0x01, 0x00, 0x5E, 0x00, 0x00, 0x00 }; /* First 3 bytes are meaningful */
@@ -187,6 +185,29 @@ char* intoa(uint32_t /* host order */ addr, char* buf, uint16_t buf_len) {
   return(retStr);
 }
 
+
+/** Convert subnet prefix bit length to host order subnet mask. */
+uint32_t bitlen2mask(uint8_t bitlen) {
+	uint8_t i;
+	uint32_t mask = 0;
+	for (i = 1; i <= bitlen; ++i) {
+		mask |= 1 << (32 - i);
+	}
+	return mask;
+}
+
+
+/** Convert host order subnet mask to subnet prefix bit length. */
+uint8_t mask2bitlen(uint32_t mask) {
+	uint8_t i, bitlen = 0;
+	for (i = 0; i < 32; ++i) {
+		if ((mask << i) & 0x80000000) ++bitlen;
+		else break;
+	}
+	return bitlen;
+}
+
+
 /* *********************************************** */
 
 char * macaddr_str(macstr_t buf,
@@ -233,20 +254,20 @@ char* msg_type2str(uint16_t msg_type) {
 
 /* *********************************************** */
 
-void hexdump(const uint8_t * buf, size_t len)
-{
-  size_t i;
+void hexdump(const uint8_t *buf, size_t len) {
+	size_t i;
 
-  if(0 == len) { return; }
+	if (0 == len) { return; }
 
-  for(i=0; i<len; i++)
-    {
-      if((i > 0) &&((i % 16) == 0)) { printf("\n"); }
-      printf("%02X ", buf[i] & 0xFF);
-    }
-
-  printf("\n");
+	printf("-----------------------------------------------\n");
+	for (i = 0; i < len; i++) {
+		if ((i > 0) && ((i % 16) == 0)) { printf("\n"); }
+		printf("%02X ", buf[i] & 0xFF);
+	}
+	printf("\n");
+	printf("-----------------------------------------------\n");
 }
+
 
 /* *********************************************** */
 
@@ -362,6 +383,17 @@ extern char * sock_to_cstr(n2n_sock_str_t out,
   }
 }
 
+char *ip_subnet_to_str(dec_ip_bit_str_t buf, const n2n_ip_subnet_t *ipaddr) {
+	snprintf(buf, sizeof(dec_ip_bit_str_t), "%hhu.%hhu.%hhu.%hhu/%hhu",
+	         (uint8_t) ((ipaddr->net_addr >> 24) & 0xFF),
+	         (uint8_t) ((ipaddr->net_addr >> 16) & 0xFF),
+	         (uint8_t) ((ipaddr->net_addr >> 8) & 0xFF),
+	         (uint8_t) (ipaddr->net_addr & 0xFF),
+	         ipaddr->net_bitlen);
+	return buf;
+}
+
+
 /* @return 1 if the two sockets are equivalent. */
 int sock_equal(const n2n_sock_t * a,
 	       const n2n_sock_t * b) {
@@ -383,3 +415,88 @@ int sock_equal(const n2n_sock_t * a,
   return(1);
 }
 
+/* *********************************************** */
+
+#if defined(WIN32)
+int gettimeofday(struct timeval *tp, void *tzp) {
+  time_t clock;
+  struct tm tm;
+  SYSTEMTIME wtm;
+  GetLocalTime(&wtm);
+  tm.tm_year = wtm.wYear - 1900;
+  tm.tm_mon = wtm.wMonth - 1;
+  tm.tm_mday = wtm.wDay;
+  tm.tm_hour = wtm.wHour;
+  tm.tm_min = wtm.wMinute;
+  tm.tm_sec = wtm.wSecond;
+  tm.tm_isdst = -1;
+  clock = mktime(&tm);
+  tp->tv_sec = clock;
+  tp->tv_usec = wtm.wMilliseconds * 1000;
+  return (0);
+}
+#endif
+
+
+// returns a time stamp for use with replay protection
+uint64_t time_stamp (void) {
+
+  struct timeval tod;
+  uint64_t micro_seconds;
+
+  gettimeofday (&tod, NULL);
+  /* We will (roughly) calculate the microseconds since 1970 leftbound into the return value.
+     The leading 32 bits are used for tv_sec. The following 20 bits (sufficent as microseconds
+     fraction never exceeds 1,000,000,) encode the value tv_usec. The remaining lowest 12 bits
+     are kept random for use in IV */
+  micro_seconds = n2n_rand();
+  micro_seconds = ( (((uint64_t)(tod.tv_sec) << 32) + (tod.tv_usec << 12))
+                  |  (micro_seconds >> 52) );
+  // more exact but more costly due to the multiplication:
+  // micro_seconds = (tod.tv_sec * 1000000 + tod.tv_usec) << 12) | ...
+
+  return (micro_seconds);
+}
+
+
+// returns an initial time stamp for use with replay protection
+uint64_t initial_time_stamp (void) {
+
+  return ( time_stamp() - TIME_STAMP_FRAME );
+}
+
+
+// checks if a provided time stamp is consistent with current time and previously valid time stamps
+// and, in case of validity, updates the "last valid time stamp"
+int time_stamp_verify_and_update (uint64_t stamp, uint64_t * previous_stamp) {
+
+  int64_t diff; // do not change to unsigned
+
+  // is it around current time (+/- allowed deviation TIME_STAMP_FRAME)?
+  diff = stamp - time_stamp();
+  // abs()
+  diff = (diff < 0 ? -diff : diff);
+  if(diff >= TIME_STAMP_FRAME) {
+      traceEvent(TRACE_DEBUG, "time_stamp_verify_and_update found a timestamp out of allowed frame.");
+      return (0); // failure
+  }
+
+  // if applicable: is it higher than previous time stamp (including allowed deviation of TIME_STAMP_JITTER)?
+  if(NULL != previous_stamp) {
+    // if no jitter allowed, reset lowest three (random) nybbles; the codnition shoudl already be evaluated by the compiler
+    if(TIME_STAMP_JITTER == 0) {
+      stamp = (stamp >> 12) << 12;
+      *previous_stamp = (*previous_stamp >> 12) << 12;
+    }
+    diff = stamp - *previous_stamp + TIME_STAMP_JITTER;
+    if(diff <= 0) {
+      traceEvent(TRACE_DEBUG, "time_stamp_verify_and_update found a timestamp too old compared to previous.");
+      return (0); // failure
+    }
+    // for not allowing to exploit the allowed TIME_STAMP_JITTER to "turn the clock backwards",
+    // set the higher of the values
+    *previous_stamp = (stamp > *previous_stamp ? stamp : *previous_stamp);
+  }
+
+  return (1); // success
+}
